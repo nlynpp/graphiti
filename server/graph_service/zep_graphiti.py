@@ -6,6 +6,9 @@ from graphiti_core import Graphiti  # type: ignore
 from graphiti_core.edges import EntityEdge  # type: ignore
 from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError, NodeNotFoundError
 from graphiti_core.llm_client import LLMClient  # type: ignore
+from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.nodes import EntityNode, EpisodicNode  # type: ignore
 
 from graph_service.config import ZepEnvDep
@@ -88,7 +91,7 @@ def _create_graphiti_client(settings: ZepEnvDep) -> ZepGraphiti:
             port=settings.falkordb_port or 6379,  # type: ignore
             database=settings.falkordb_database or 'default_db',  # type: ignore
         )
-        return ZepGraphiti(graph_driver=driver)  # type: ignore
+        return ZepGraphiti(graph_driver=driver, llm_client=_create_llm(settings), embedder=_create_embedder(settings))  # type: ignore
     else:
         # Validate Neo4j settings are present
         if not all([settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password]):
@@ -100,7 +103,25 @@ def _create_graphiti_client(settings: ZepEnvDep) -> ZepGraphiti:
             uri=settings.neo4j_uri,
             user=settings.neo4j_user,
             password=settings.neo4j_password,
+            llm_client=_create_llm(settings),
+            embedder=_create_embedder(settings),
         )
+
+
+def _create_llm(settings):
+    return OpenAIGenericClient(
+        LLMConfig(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.model_name or 'qwen-turbo',
+        ),
+        max_tokens=8192,
+        structured_output_mode='json_object',
+    )
+
+
+def _create_embedder(settings):
+    return OpenAIEmbedder(OpenAIEmbedderConfig(api_key=settings.openai_api_key, base_url=settings.openai_base_url, embedding_model=settings.embedding_model_name or 'text-embedding-v2', embedding_dim=1536))
 
 
 async def get_graphiti(settings: ZepEnvDep):
@@ -115,7 +136,10 @@ async def get_graphiti(settings: ZepEnvDep):
     try:
         yield client
     finally:
-        await client.close()
+        # The messages endpoint queues background work that may outlive the
+        # request scope; closing here causes queued jobs to fail with
+        # ``Driver closed``. The process owns this client for its lifetime.
+        pass
 
 
 async def initialize_graphiti(settings: ZepEnvDep):

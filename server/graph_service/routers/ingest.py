@@ -55,7 +55,9 @@ async def add_messages(
 ):
     async def add_messages_task(m: Message):
         await graphiti.add_episode(
-            uuid=m.uuid,
+            # Do not pass a client UUID for new episodes: graphiti-core treats
+            # a supplied UUID as an existing node lookup. It will generate a
+            # UUID for this new episode.
             group_id=request.group_id,
             name=m.name,
             episode_body=f'{m.role or ""}({m.role_type}): {m.content}',
@@ -64,10 +66,13 @@ async def add_messages(
             source_description=m.source_description,
         )
 
+    # Process in the request scope so the Graphiti client remains open until
+    # each episode has been persisted. The previous queue-based approach could
+    # return 202 while no router worker was running, leaving Neo4j empty.
     for m in request.messages:
-        await async_worker.queue.put(partial(add_messages_task, m))
+        await add_messages_task(m)
 
-    return Result(message='Messages added to processing queue', success=True)
+    return Result(message='Messages processed and added to graph', success=True)
 
 
 @router.post('/entity-node', status_code=status.HTTP_201_CREATED)

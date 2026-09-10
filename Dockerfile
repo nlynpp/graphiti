@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.9
 FROM python:3.12-slim
 
 # Inherit build arguments for labels
@@ -52,8 +51,15 @@ RUN groupadd -r app && useradd -r -d /app -g app app
 
 # Set up the server application first
 WORKDIR /app
+ARG GRAPHITI_VERSION
+ARG INSTALL_FALKORDB=false
+ARG SOCKET_FIREWALL_ENABLED=false
+ARG SOCKET_SCAN_ID=
 COPY ./server/pyproject.toml ./server/README.md ./server/uv.lock ./
 COPY ./server/graph_service ./graph_service
+COPY ./pyproject.toml /tmp/graphiti-core/pyproject.toml
+COPY ./README.md /tmp/graphiti-core/README.md
+COPY ./graphiti_core /tmp/graphiti-core/graphiti_core
 
 # Install server dependencies (without graphiti-core from lockfile)
 # Then install graphiti-core from PyPI at the desired version
@@ -87,19 +93,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
       UV_CMD="uv"; \
     fi; \
     $UV_CMD sync --frozen --no-dev; \
-    if [ -n "$GRAPHITI_VERSION" ]; then \
+    if [ -n "${GRAPHITI_VERSION:-}" ]; then \
         if [ "$INSTALL_FALKORDB" = "true" ]; then \
-            $UV_CMD pip install --upgrade "graphiti-core[falkordb]==$GRAPHITI_VERSION"; \
+            $UV_CMD pip install --upgrade "graphiti-core[falkordb]==${GRAPHITI_VERSION}"; \
         else \
-            $UV_CMD pip install --upgrade "graphiti-core==$GRAPHITI_VERSION"; \
+            $UV_CMD pip install --upgrade "graphiti-core==${GRAPHITI_VERSION}"; \
         fi; \
     else \
         if [ "$INSTALL_FALKORDB" = "true" ]; then \
             $UV_CMD pip install --upgrade "graphiti-core[falkordb]"; \
-        else \
+    else \
             $UV_CMD pip install --upgrade graphiti-core; \
         fi; \
-    fi
+    fi; \
+    $UV_CMD pip install --no-deps --upgrade --editable /tmp/graphiti-core; \
+    $UV_CMD pip install python-dotenv
 
 # Change ownership to app user
 RUN chown -R app:app /app

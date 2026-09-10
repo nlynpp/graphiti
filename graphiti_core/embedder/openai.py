@@ -60,7 +60,13 @@ class OpenAIEmbedder(EmbedderClient):
         return result.data[0].embedding[: self.config.embedding_dim]
 
     async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
-        result = await self.client.embeddings.create(
-            input=input_data_list, model=self.config.embedding_model
-        )
-        return [embedding.embedding[: self.config.embedding_dim] for embedding in result.data]
+        # DashScope (and several OpenAI-compatible providers) limit embedding
+        # batches to 25 inputs. Split larger Graphiti batches and preserve order.
+        embeddings: list[list[float]] = []
+        for start in range(0, len(input_data_list), 25):
+            batch = input_data_list[start : start + 25]
+            result = await self.client.embeddings.create(
+                input=batch, model=self.config.embedding_model
+            )
+            embeddings.extend(e.embedding[: self.config.embedding_dim] for e in result.data)
+        return embeddings
