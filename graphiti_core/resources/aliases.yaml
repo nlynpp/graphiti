@@ -1,0 +1,53 @@
+# OHN-GraphRAG 别名词典（方案第 6 节）
+#
+# alias_level:
+#   strong      — 无条件合并（人工确认的同义）
+#   conditional — 必须结合上下文条件，不能全局无条件合并
+#
+# 修改后重启服务即可生效（容器内只读挂载 graphiti_core/resources）。
+
+aliases:
+  # --- 法律领域示例（strong） ---
+  - canonical_name: 最高人民法院
+    canonical_id: supreme_peoples_court
+    entity_type: Court
+    aliases: [最高法, 最高院, SPC]
+    alias_level: strong
+    confidence: 1.0
+
+  - canonical_name: 中华人民共和国劳动合同法
+    canonical_id: prc_labor_contract_law
+    entity_type: Law
+    aliases: [劳动合同法]
+    alias_level: strong
+    confidence: 1.0
+
+  - canonical_name: 人民检察院
+    canonical_id: peoples_procuratorate
+    entity_type: Court
+    aliases: [检察院]
+    alias_level: strong
+    confidence: 1.0
+
+  # --- 方案第 6 节示例 ---
+  - canonical_name: 中华人民共和国
+    canonical_id: china
+    entity_type: Region
+    aliases: [中国]
+    alias_level: strong
+    confidence: 1.0
+
+  - canonical_name: Apple Inc.
+    canonical_id: apple_inc
+    entity_type: Enterprise
+    aliases: [Apple, 苹果公司]
+    alias_level: strong
+    confidence: 1.0
+
+  - canonical_name: Apple Inc.
+    canonical_id: apple_inc
+    entity_type: Enterprise
+    aliases: [苹果]
+    alias_level: conditional
+    conditions: [出现 iPhone、Mac、公司、发布、产品等企业上下文]
+    confidence: 0.8

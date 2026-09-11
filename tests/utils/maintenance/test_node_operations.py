@@ -34,6 +34,7 @@ from graphiti_core.utils.maintenance.node_operations import (
 
 def _make_clients():
     driver = MagicMock()
+    driver.execute_query = AsyncMock(return_value=([], None, None))
     embedder = MagicMock()
     cross_encoder = MagicMock()
     llm_client = MagicMock()
@@ -250,17 +251,9 @@ async def test_resolve_nodes_semantic_miss_keeps_node_without_llm(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resolve_nodes_multiple_exact_matches_use_llm(monkeypatch):
+async def test_resolve_nodes_multiple_exact_matches_merge_deterministically(monkeypatch):
+    """Identical same-name candidates merge via the normalization score, no LLM call."""
     clients, llm_generate = _make_clients()
-    llm_generate.return_value = {
-        'entity_resolutions': [
-            {
-                'id': 0,
-                'name': 'Java',
-                'duplicate_candidate_id': 0,
-            }
-        ]
-    }
     candidate1 = EntityNode(name='Java', group_id='group', labels=['Entity'])
     candidate2 = EntityNode(name='Java', group_id='group', labels=['Entity'])
     extracted = EntityNode(name='Java', group_id='group', labels=['Entity'])
@@ -279,7 +272,39 @@ async def test_resolve_nodes_multiple_exact_matches_use_llm(monkeypatch):
 
     assert resolved[0].uuid == candidate1.uuid
     assert uuid_map[extracted.uuid] == candidate1.uuid
-    llm_generate.assert_awaited()
+    llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_nodes_type_conflict_stays_separate(monkeypatch):
+    """Same surface name with conflicting types must never merge (spec 5.2)."""
+    clients, llm_generate = _make_clients()
+    llm_generate.return_value = {
+        'entity_resolutions': [
+            {
+                'id': 0,
+                'name': '苹果',
+                'duplicate_candidate_id': -1,
+            }
+        ]
+    }
+    candidate = EntityNode(name='苹果', group_id='group', labels=['Entity', 'Material'])
+    extracted = EntityNode(name='苹果', group_id='group', labels=['Entity', 'Enterprise'])
+
+    monkeypatch.setattr(
+        'graphiti_core.utils.maintenance.node_operations._semantic_candidate_search',
+        _semantic_candidates([[candidate]]),
+    )
+
+    resolved, uuid_map, _ = await resolve_extracted_nodes(
+        clients,
+        [extracted],
+        episode=_make_episode(),
+        previous_episodes=[],
+    )
+
+    assert resolved[0].uuid == extracted.uuid
+    assert uuid_map[extracted.uuid] == extracted.uuid
 
 
 @pytest.mark.asyncio

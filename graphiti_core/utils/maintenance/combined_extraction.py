@@ -29,9 +29,11 @@ from graphiti_core.prompts.extract_edges import BatchEdgeTimestamps
 from graphiti_core.prompts.extract_nodes_and_edges import CombinedExtraction
 from graphiti_core.utils.datetime_utils import ensure_utc, utc_now
 from graphiti_core.utils.maintenance.dedup_helpers import _normalize_string_exact
+from graphiti_core.utils.maintenance.normalizer import generate_entity_key
 from graphiti_core.utils.maintenance.node_operations import (
     _build_entity_types_context,
     _collapse_exact_duplicate_extracted_nodes,
+    _derive_entity_uuid,
 )
 from graphiti_core.utils.text_utils import concatenate_episodes
 
@@ -159,12 +161,21 @@ async def extract_nodes_and_edges(
             continue
 
         labels: list[str] = list({'Entity', str(entity_type_name)})
+        # Mirror _create_entity_nodes: global unique key drives the
+        # deterministic uuid so same-key entities merge idempotently across
+        # chunks (normalization spec section 3).
+        entity_key = generate_entity_key(entity_type_name, entity.name)
         new_node = EntityNode(
+            uuid=_derive_entity_uuid(primary_episode.group_id, entity_key),
             name=entity.name,
             group_id=primary_episode.group_id,
             labels=labels,
             summary='',
             created_at=utc_now(),
+            attributes={
+                'entity_key': entity_key,
+                'normalization_status': 'normalized',
+            },
         )
         extracted_nodes.append(new_node)
 

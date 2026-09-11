@@ -55,6 +55,10 @@ class Neo4jEpisodicEdgeOperations(EpisodicEdgeOperations):
             'uuid': edge.uuid,
             'group_id': edge.group_id,
             'created_at': edge.created_at,
+            'mention_text': edge.mention_text,
+            'source_chunk_id': edge.source_chunk_id or edge.source_node_uuid,
+            'resolution': edge.resolution,
+            'resolution_confidence': edge.resolution_confidence,
         }
         if tx is not None:
             await tx.run(EPISODIC_EDGE_SAVE, **params)

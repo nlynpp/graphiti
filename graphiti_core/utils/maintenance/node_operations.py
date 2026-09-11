@@ -16,8 +16,10 @@ limitations under the License.
 
 import logging
 from collections.abc import Awaitable, Callable
+from functools import lru_cache
 from time import time
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel
 
@@ -47,10 +49,18 @@ from graphiti_core.utils.maintenance.dedup_helpers import (
     DedupCandidateIndexes,
     DedupResolutionState,
     _build_candidate_indexes,
-    _normalize_string_exact,
     _promote_resolved_node,
     _resolve_with_similarity,
 )
+from graphiti_core.utils.maintenance.normalizer import (
+    RESOLUTION_MERGED,
+    RESOLUTION_PENDING_REVIEW,
+    CandidateScore,
+    generate_entity_key,
+    normalize_name,
+    score_candidate,
+)
+from graphiti_core.utils.maintenance.review_ops import save_merge_audit, save_pending_review
 from graphiti_core.utils.text_utils import (
     MAX_SUMMARY_CHARS,
     concatenate_episodes,
@@ -65,6 +75,30 @@ NODE_DEDUP_CANDIDATE_LIMIT = 15
 NODE_DEDUP_COSINE_MIN_SCORE = 0.6
 
 NodeSummaryFilter = Callable[[EntityNode], Awaitable[bool]]
+
+# Namespace for deterministic entity uuids derived from the global entity_key.
+_ENTITY_KEY_NAMESPACE = uuid5(NAMESPACE_URL, 'ohn-graphiti-entity-key')
+
+
+def _derive_entity_uuid(group_id: str, entity_key: str) -> str:
+    """Deterministic uuid for an entity_key, scoped to the group_id partition."""
+    return str(uuid5(_ENTITY_KEY_NAMESPACE, f'{group_id}:{entity_key}'))
+
+
+def _primary_entity_type(labels: list[str]) -> str:
+    """Return the most specific entity type label (the first non-generic one)."""
+    for label in labels:
+        if label != 'Entity':
+            return label
+    return 'Entity'
+
+
+@lru_cache(maxsize=1)
+def _get_alias_dictionary():
+    """Load the alias dictionary lazily so import never fails on a missing file."""
+    from graphiti_core.utils.maintenance.alias_dict import load_alias_dictionary
+
+    return load_alias_dictionary()
 
 
 async def extract_nodes(
@@ -312,12 +346,23 @@ def _create_entity_nodes(
 
         labels: list[str] = list({'Entity', str(entity_type_name)})
 
+        # Global unique key `entity_type:canonical_id` (spec section 3). The
+        # uuid is derived from it so same-key entities merge idempotently
+        # across chunks while same-named entities of different types stay
+        # separate. `llm:{chunk}:{id}` style ids remain extraction-internal
+        # only.
+        entity_key = generate_entity_key(entity_type_name, extracted_entity.name)
         new_node = EntityNode(
+            uuid=_derive_entity_uuid(primary_episode.group_id, entity_key),
             name=extracted_entity.name,
             group_id=primary_episode.group_id,
             labels=labels,
             summary='',
             created_at=utc_now(),
+            attributes={
+                'entity_key': entity_key,
+                'normalization_status': 'normalized',
+            },
         )
         extracted_nodes.append(new_node)
 
@@ -349,16 +394,34 @@ def _collapse_exact_duplicate_extracted_nodes(
     if len(extracted_nodes) < 2:
         return extracted_nodes
 
-    canonical_by_name: dict[str, EntityNode] = {}
-    ordered_names: list[str] = []
+    # Same-chunk dedup key per the normalization spec (section 4.2):
+    # (normalized entity type, normalized name). Different *specific* types
+    # with the same surface form stay separate; a bare generic `Entity` label
+    # still collapses into a specifically-typed node (type promotion).
+    canonical_by_key: dict[tuple[str, str], EntityNode] = {}
+    ordered_keys: list[tuple[str, str]] = []
+    keys_by_name: dict[str, list[tuple[str, str]]] = {}
 
     for node in extracted_nodes:
-        normalized_name = _normalize_string_exact(node.name)
-        existing = canonical_by_name.get(normalized_name)
-        if existing is None:
-            canonical_by_name[normalized_name] = node
-            ordered_names.append(normalized_name)
+        type_name = _primary_entity_type(node.labels)
+        type_part = '' if type_name == 'Entity' else normalize_name(type_name)
+        name_part = normalize_name(node.name)
+
+        existing_key = None
+        for key in keys_by_name.get(name_part, []):
+            # Collapse when either side is generic or the specific types match.
+            if not type_part or not key[0] or type_part == key[0]:
+                existing_key = key
+                break
+
+        if existing_key is None:
+            dedup_key = (type_part, name_part)
+            canonical_by_key[dedup_key] = node
+            ordered_keys.append(dedup_key)
+            keys_by_name.setdefault(name_part, []).append(dedup_key)
             continue
+
+        existing = canonical_by_key[existing_key]
 
         existing_specific_labels = {label for label in existing.labels if label != 'Entity'}
         node_specific_labels = {label for label in node.labels if label != 'Entity'}
@@ -367,7 +430,7 @@ def _collapse_exact_duplicate_extracted_nodes(
             and len(node.name.strip()) > len(existing.name.strip())
         ):
             old_canonical = existing
-            canonical_by_name[normalized_name] = node
+            canonical_by_key[existing_key] = node
             # Merge episode indices: old canonical -> new canonical
             if node_episode_index_map is not None:
                 old_indices = node_episode_index_map.pop(old_canonical.uuid, [])
@@ -381,7 +444,7 @@ def _collapse_exact_duplicate_extracted_nodes(
                 set(canonical_indices + discarded_indices)
             )
 
-    return [canonical_by_name[name] for name in ordered_names]
+    return [canonical_by_key[key] for key in ordered_keys]
 
 
 def _merge_candidate_nodes(
@@ -555,7 +618,26 @@ async def _resolve_with_llm(
         prompt_name='dedupe_nodes.nodes',
     )
 
-    node_resolutions: list[NodeDuplicate] = NodeResolutions(**llm_response).entity_resolutions
+    # Structured-output providers occasionally echo the JSON schema instead
+    # of values ({"properties": {...}} envelope); unwrap it and drop
+    # non-conforming entries so one malformed resolution cannot kill the batch.
+    if isinstance(llm_response, dict) and isinstance(llm_response.get('properties'), dict):
+        llm_response = {
+            key: value
+            for key, value in {**llm_response['properties'], **llm_response}.items()
+            if key != 'properties'
+        }
+    raw_resolutions = llm_response.get('entity_resolutions', llm_response) if isinstance(llm_response, dict) else llm_response
+    if isinstance(raw_resolutions, dict):
+        raw_resolutions = [
+            value for value in raw_resolutions.values() if isinstance(value, dict)
+        ]
+    node_resolutions: list[NodeDuplicate] = []
+    for raw in raw_resolutions if isinstance(raw_resolutions, list) else []:
+        try:
+            node_resolutions.append(NodeDuplicate(**raw))
+        except Exception:
+            logger.warning('Skipping malformed LLM node resolution: %s', raw)
 
     valid_relative_range = range(len(state.unresolved_indices))
     processed_relative_ids: set[int] = set()
@@ -624,6 +706,133 @@ async def _resolve_with_llm(
             state.duplicate_pairs.append((extracted_node, resolved_node))
 
 
+def _score_candidate_pair(
+    node: EntityNode, candidate: EntityNode
+) -> tuple[CandidateScore, str | None]:
+    """Score one (extracted, existing) pair with the explainable normalization weights.
+
+    Returns the score plus the entity_key a strong-alias hit resolves to
+    (None when no alias applies).
+    """
+    node_type = _primary_entity_type(node.labels)
+    candidate_type = _primary_entity_type(candidate.labels)
+
+    alias_hit = None
+    alias_dictionary = _get_alias_dictionary()
+    if alias_dictionary is not None:
+        alias_hit = alias_dictionary.lookup(node.name, node_type)
+
+    alias_canonical_applies = (
+        alias_hit is not None
+        and normalize_name(candidate.name) == normalize_name(alias_hit.canonical_name)
+    )
+
+    if alias_canonical_applies and alias_hit is not None:
+        node_key = generate_entity_key(alias_hit.entity_type, alias_hit.canonical_name)
+    else:
+        node_key = node.attributes.get('entity_key') or generate_entity_key(node_type, node.name)
+    candidate_key = candidate.attributes.get('entity_key') or generate_entity_key(
+        candidate_type, candidate.name
+    )
+
+    candidate_score = score_candidate(
+        node_type,
+        candidate_type,
+        node_key.split(':', 1)[1] if ':' in node_key else normalize_name(node.name),
+        candidate_key.split(':', 1)[1] if ':' in candidate_key else normalize_name(candidate.name),
+        alias_hit=alias_hit if alias_canonical_applies else None,
+    )
+
+    # External/registered key identity is the strongest deterministic signal.
+    if node_key == candidate_key:
+        candidate_score.score = max(
+            candidate_score.score, 1.0
+        )
+        candidate_score.reasons.append('entity_key identical')
+
+    return candidate_score, (alias_hit.canonical_name if alias_canonical_applies else None)
+
+
+async def _resolve_extracted_node_pair(
+    driver,
+    node: EntityNode,
+    candidates: list[EntityNode],
+    episode: EpisodicNode | None,
+    audited_pairs: set[tuple[str, str]] | None = None,
+) -> tuple[EntityNode | None, bool]:
+    """Resolve one extracted node against candidates via alias dict + scoring.
+
+    Returns (resolved_node, escalated_to_llm). ``resolved_node`` is set when
+    the best candidate reached the auto-merge band; pending-review candidates
+    are recorded in the review queue and left to the LLM/context pass; scores
+    below the review threshold keep the entities separate.
+    """
+    if not candidates:
+        return None, True
+
+    scored: list[tuple[CandidateScore, EntityNode]] = []
+    for candidate in candidates:
+        candidate_score, _alias_canonical = _score_candidate_pair(node, candidate)
+        scored.append((candidate_score, candidate))
+    scored.sort(key=lambda item: item[0].score, reverse=True)
+
+    best_score, best_candidate = scored[0]
+    decision = best_score.decision
+
+    if best_score.score < 0:
+        # Conflicting types or attributes: never merge.
+        return None, True
+
+    if decision == RESOLUTION_MERGED:
+        resolved = _promote_resolved_node(node, best_candidate)
+        node_key = node.attributes.get('entity_key') or generate_entity_key(
+            _primary_entity_type(node.labels), node.name
+        )
+        best_key = best_candidate.attributes.get('entity_key') or generate_entity_key(
+            _primary_entity_type(best_candidate.labels), best_candidate.name
+        )
+        await save_merge_audit(
+            driver,
+            old_entity_key=str(node_key),
+            new_entity_key=str(best_key),
+            trigger_rule='; '.join(best_score.reasons),
+            score=best_score.score,
+            source_chunk_id=episode.uuid if episode is not None else None,
+            group_id=node.group_id,
+        )
+        if audited_pairs is not None:
+            audited_pairs.add((node.uuid, best_key))
+        return resolved, False
+
+    if decision == RESOLUTION_PENDING_REVIEW:
+        node_key = str(
+            node.attributes.get('entity_key')
+            or generate_entity_key(_primary_entity_type(node.labels), node.name)
+        )
+        candidate_keys = [
+            str(
+                candidate.attributes.get('entity_key')
+                or generate_entity_key(_primary_entity_type(candidate.labels), candidate.name)
+            )
+            for _score, candidate in scored
+            if _score.score >= 0
+        ][:5]
+        await save_pending_review(
+            driver,
+            entity_key=node_key,
+            candidate_keys=candidate_keys,
+            score=best_score.score,
+            reason='; '.join(best_score.reasons) or 'ambiguous candidates',
+            source_chunk_id=episode.uuid if episode is not None else None,
+            group_id=node.group_id,
+            context=episode.content[:500] if episode is not None else None,
+        )
+        # Escalate to the LLM pass; nothing was merged.
+        return None, True
+
+    return None, True
+
+
 async def resolve_extracted_nodes(
     clients: GraphitiClients,
     extracted_nodes: list[EntityNode],
@@ -645,11 +854,30 @@ async def resolve_extracted_nodes(
         uuid_map={},
         unresolved_indices=[],
     )
+    audited_pairs: set[tuple[str, str]] = set()
 
     for idx, (node, candidates) in enumerate(
         zip(extracted_nodes, candidate_nodes_by_extracted, strict=True)
     ):
         if not candidates:
+            continue
+
+        # Deterministic normalization pass first: alias dictionary and the
+        # explainable score decide merge / pending_review / keep-separate
+        # before any fuzzy or LLM matching runs.
+        normalized_resolution, escalate = await _resolve_extracted_node_pair(
+            clients.driver, node, candidates, episode, audited_pairs
+        )
+        if normalized_resolution is not None:
+            _commit_resolution(
+                state,
+                normalized_resolution,
+                {node.uuid: normalized_resolution.uuid},
+                [(node, normalized_resolution)],
+                idx,
+            )
+            continue
+        if not escalate:
             continue
 
         indexes = _build_candidate_indexes(candidates)
@@ -695,6 +923,30 @@ async def resolve_extracted_nodes(
         if state.resolved_nodes[idx] is None:
             state.resolved_nodes[idx] = node
             state.uuid_map[node.uuid] = node.uuid
+
+    # Audit merges performed by the similarity/LLM passes (normalization-path
+    # merges already wrote their own records with the trigger rule).
+    for merged_node, resolved_node in state.duplicate_pairs:
+        old_key = str(
+            merged_node.attributes.get('entity_key')
+            or generate_entity_key(_primary_entity_type(merged_node.labels), merged_node.name)
+        )
+        new_key = str(
+            resolved_node.attributes.get('entity_key')
+            or generate_entity_key(_primary_entity_type(resolved_node.labels), resolved_node.name)
+        )
+        if (merged_node.uuid, new_key) in audited_pairs:
+            continue
+        await save_merge_audit(
+            clients.driver,
+            old_entity_key=old_key,
+            new_entity_key=new_key,
+            trigger_rule='dedup_pipeline',
+            score=None,
+            source_chunk_id=episode.uuid if episode is not None else None,
+            group_id=merged_node.group_id,
+        )
+        audited_pairs.add((merged_node.uuid, new_key))
 
     logger.debug(
         'Resolved nodes: %s',

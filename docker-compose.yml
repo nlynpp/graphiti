@@ -5,6 +5,9 @@ services:
       context: .
     ports:
       - "8000:8000"
+    volumes:
+      # 别名词典只读挂载：更新 aliases.yaml 后重启容器即可生效，无需重建镜像
+      - ./graphiti_core/resources:/app/graphiti_core/resources:ro
     healthcheck:
       test:
         [

@@ -1,0 +1,148 @@
+# OHN-GraphRAG 法律本体（开发方案第 4 节）
+# 本体先于抽取结果定义；LLM 不得创建此白名单之外的类型或关系。
+
+ontology_id: legal_ontology
+version: "1.0.0"
+domain: legal
+
+entity_types:
+  Organization:
+    description: 组织机构，包括政府机关、法院、企业等
+    attributes:
+      canonical_name: { type: string, required: true }
+      organization_type: { type: enum, values: [government, court, enterprise, association, institution, unknown] }
+  GovernmentAgency:
+    description: 政府机关
+    parent: Organization
+  Court:
+    description: 法院
+    parent: Organization
+  Enterprise:
+    description: 企业
+    parent: Organization
+  LegalDocument:
+    description: 法律文件
+    attributes:
+      title: { type: string, required: true }
+      document_number: { type: string }
+      validity_status: { type: enum, values: [effective, abolished, draft, unknown] }
+  Constitution:
+    description: 宪法及宪法修正案
+    parent: LegalDocument
+  Law:
+    description: 法律
+    parent: LegalDocument
+  Regulation:
+    description: 行政法规
+    parent: LegalDocument
+  JudicialInterpretation:
+    description: 司法解释
+    parent: LegalDocument
+  AdministrativeNotice:
+    description: 行政通知
+    parent: LegalDocument
+  LegalConcept:
+    description: 法律概念（权利、义务、责任等）
+  Right:
+    description: 权利
+    parent: LegalConcept
+  Obligation:
+    description: 义务
+    parent: LegalConcept
+  Liability:
+    description: 法律责任
+    parent: LegalConcept
+  Procedure:
+    description: 程序
+    parent: LegalConcept
+  LegalAct:
+    description: 法律行为
+    parent: LegalConcept
+  Remedy:
+    description: 救济
+    parent: LegalConcept
+  Person:
+    description: 自然人
+  Case:
+    description: 案件
+  Party:
+    description: 当事人
+  Article:
+    description: 条款
+    attributes:
+      article_number: { type: string, required: true }
+  Condition:
+    description: 条件
+  Exception:
+    description: 例外
+  Penalty:
+    description: 处罚
+  Amount:
+    description: 数额、比例、期限
+    attributes:
+      value: { type: number }
+      unit: { type: enum, values: [元, 万元, 百分比, 天, 月, 年] }
+  Date:
+    description: 日期
+  Region:
+    description: 地区
+  Evidence:
+    description: 证据
+  Material:
+    description: 一般事物
+  UnknownEntity:
+    description: 无法判断类型时的兜底，进入待审核队列
+
+relation_types:
+  ISSUED_BY:
+    source: [LegalDocument]
+    target: [Organization]
+    evidence_required: true
+  AMENDS:
+    source: [LegalDocument]
+    target: [LegalDocument, Article]
+    evidence_required: true
+  REPEALS:
+    source: [LegalDocument]
+    target: [LegalDocument]
+    evidence_required: true
+  CONTAINS_ARTICLE:
+    source: [LegalDocument]
+    target: [Article]
+    evidence_required: true
+  DEFINES:
+    source: [LegalDocument]
+    target: [LegalConcept]
+    evidence_required: true
+  APPLIES_TO:
+    source: [LegalConcept]
+    target: [Person, Organization, Party]
+    evidence_required: true
+  REQUIRES:
+    source: [LegalConcept]
+    target: [Condition]
+    evidence_required: true
+  EXCEPTS:
+    source: [LegalConcept]
+    target: [Exception]
+    evidence_required: true
+  HAS_PENALTY:
+    source: [LegalConcept]
+    target: [Penalty]
+    evidence_required: true
+  HAS_AMOUNT:
+    source: [LegalConcept]
+    target: [Amount]
+    evidence_required: true
+  EFFECTIVE_ON:
+    source: [LegalDocument]
+    target: [Date]
+    evidence_required: true
+  APPLIES_IN:
+    source: [LegalDocument]
+    target: [Region]
+    evidence_required: true
+  CITES:
+    source: [LegalDocument, Article, Content]
+    target: [LegalDocument, Article, Content]
+    evidence_required: true

@@ -22,7 +22,11 @@ EPISODIC_EDGE_SAVE = """
     MERGE (episode)-[e:MENTIONS {uuid: $uuid}]->(node)
     SET
         e.group_id = $group_id,
-        e.created_at = $created_at
+        e.created_at = $created_at,
+        e.mention_text = coalesce($mention_text, e.mention_text),
+        e.source_chunk_id = coalesce($source_chunk_id, e.source_chunk_id),
+        e.resolution = coalesce($resolution, e.resolution),
+        e.resolution_confidence = coalesce($resolution_confidence, e.resolution_confidence)
     RETURN e.uuid AS uuid
 """
 
@@ -35,7 +39,11 @@ def get_episodic_edge_save_bulk_query(provider: GraphProvider) -> str:
             MERGE (episode)-[e:MENTIONS {uuid: $uuid}]->(node)
             SET
                 e.group_id = $group_id,
-                e.created_at = $created_at
+                e.created_at = $created_at,
+                e.mention_text = coalesce($mention_text, e.mention_text),
+                e.source_chunk_id = coalesce($source_chunk_id, e.source_chunk_id),
+                e.resolution = coalesce($resolution, e.resolution),
+                e.resolution_confidence = coalesce($resolution_confidence, e.resolution_confidence)
             RETURN e.uuid AS uuid
         """
 
@@ -46,7 +54,11 @@ def get_episodic_edge_save_bulk_query(provider: GraphProvider) -> str:
         MERGE (episode)-[e:MENTIONS {uuid: edge.uuid}]->(node)
         SET
             e.group_id = edge.group_id,
-            e.created_at = edge.created_at
+            e.created_at = edge.created_at,
+            e.mention_text = coalesce(edge.mention_text, e.mention_text),
+            e.source_chunk_id = coalesce(edge.source_chunk_id, e.source_chunk_id),
+            e.resolution = coalesce(edge.resolution, e.resolution),
+            e.resolution_confidence = coalesce(edge.resolution_confidence, e.resolution_confidence)
         RETURN e.uuid AS uuid
     """
 

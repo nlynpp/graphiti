@@ -183,7 +183,16 @@ async def add_nodes_and_edges_bulk_tx(
             entity_data['attributes'] = json.dumps(attributes)
         else:
             for k, v in (node.attributes or {}).items():
-                if k not in entity_data:
+                if k in entity_data:
+                    continue
+                # Neo4j only accepts primitives and arrays of primitives;
+                # structured-output providers occasionally echo nested schema
+                # objects as attribute values, so flatten or drop them.
+                if isinstance(v, dict):
+                    entity_data[k] = json.dumps(convert_datetimes_to_strings(v))
+                elif isinstance(v, list) and any(isinstance(item, dict) for item in v):
+                    entity_data[k] = json.dumps(convert_datetimes_to_strings(v))
+                else:
                     entity_data[k] = v
 
         nodes.append(entity_data)

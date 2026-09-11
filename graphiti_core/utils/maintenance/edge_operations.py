@@ -82,12 +82,20 @@ def build_episodic_edges(
 
         for idx in indices:
             if 0 <= idx < len(episode_uuids):
+                episode_uuid = episode_uuids[idx]
                 episodic_edges.append(
                     EpisodicEdge(
-                        source_node_uuid=episode_uuids[idx],
+                        source_node_uuid=episode_uuid,
                         target_node_uuid=node.uuid,
                         created_at=created_at,
                         group_id=node.group_id,
+                        # Mention evidence (normalization spec section 2):
+                        # the surface form and chunk provenance travel on the
+                        # MENTIONS relation, not on the global entity node.
+                        mention_text=node.name,
+                        source_chunk_id=episode_uuid,
+                        resolution='new',
+                        resolution_confidence=1.0,
                     )
                 )
 
@@ -729,6 +737,23 @@ async def resolve_extracted_edge(
         model_size=ModelSize.small,
         prompt_name='dedupe_edges.resolve_edge',
     )
+    # Some OpenAI-compatible providers (e.g. DashScope/qwen) echo the JSON
+    # schema instead of values: either a flat {"properties": {...}} envelope
+    # or schema descriptors like {"type": "array", "description": ...} in place
+    # of the fields themselves. Strip anything that is not a usable value so
+    # validation falls back to field defaults.
+    if isinstance(llm_response, dict):
+        cleaned: dict = {}
+        for key, value in llm_response.items():
+            if key == 'properties' and isinstance(value, dict):
+                for prop_key, prop_value in value.items():
+                    if not isinstance(prop_value, dict):
+                        cleaned[prop_key] = prop_value
+            elif isinstance(value, list):
+                cleaned[key] = value
+        llm_response = cleaned
+    llm_response.setdefault('duplicate_facts', [])
+    llm_response.setdefault('contradicted_facts', [])
     response_object = EdgeDuplicate(**llm_response)
     duplicate_facts = response_object.duplicate_facts
 

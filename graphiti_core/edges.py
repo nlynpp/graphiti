@@ -141,6 +141,23 @@ class Edge(BaseModel, ABC):
 
 
 class EpisodicEdge(Edge):
+    # Mention evidence carried on the MENTIONS relation (normalization spec
+    # section 2): each occurrence keeps its surface text and provenance so a
+    # global entity can be traced back to every chunk that mentioned it.
+    mention_text: str | None = Field(
+        default=None, description='surface form of the entity in this mention'
+    )
+    source_chunk_id: str | None = Field(
+        default=None, description='uuid of the episode/chunk containing the mention'
+    )
+    resolution: str | None = Field(
+        default=None,
+        description='how the mention was resolved: merged / new / pending_review',
+    )
+    resolution_confidence: float | None = Field(
+        default=None, description='confidence of the normalization decision'
+    )
+
     async def save(self, driver: GraphDriver):
         if driver.graph_operations_interface:
             try:
@@ -155,6 +172,10 @@ class EpisodicEdge(Edge):
             uuid=self.uuid,
             group_id=self.group_id,
             created_at=self.created_at,
+            mention_text=self.mention_text,
+            source_chunk_id=self.source_chunk_id or self.source_node_uuid,
+            resolution=self.resolution,
+            resolution_confidence=self.resolution_confidence,
         )
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')

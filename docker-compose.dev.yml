@@ -1,0 +1,8 @@
+# 开发模式覆盖：源码只读挂载进容器，避免频繁重建镜像。
+# 用法：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d graph
+# 正式部署时去掉 -f docker-compose.dev.yml 即可。
+services:
+  graph:
+    volumes:
+      - ./graphiti_core:/tmp/graphiti-core/graphiti_core:ro
+      - ./server/graph_service:/app/graph_service:ro

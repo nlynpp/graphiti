@@ -79,6 +79,9 @@ def get_range_indices(provider: GraphProvider) -> list[LiteralString]:
         'CREATE INDEX expired_at_edge_index IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.expired_at)',
         'CREATE INDEX valid_at_edge_index IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.valid_at)',
         'CREATE INDEX invalid_at_edge_index IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.invalid_at)',
+        # Entity normalization: pending-review queue and merge audit trail
+        'CREATE INDEX pending_review_entity_key IF NOT EXISTS FOR (n:PendingReview) ON (n.entity_key)',
+        'CREATE INDEX merge_audit_new_key IF NOT EXISTS FOR (n:MergeAudit) ON (n.new_entity_key)',
     ]
 
 

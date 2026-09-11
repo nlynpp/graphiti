@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+import os
 from datetime import datetime
 from time import time
 from uuid import uuid4
@@ -83,6 +84,7 @@ from graphiti_core.utils.bulk_utils import (
     retrieve_previous_episodes_bulk,
 )
 from graphiti_core.utils.datetime_utils import utc_now
+from graphiti_core.utils.maintenance.combined_extraction import extract_nodes_and_edges
 from graphiti_core.utils.maintenance.community_operations import (
     build_communities,
     remove_communities,
@@ -1176,15 +1178,40 @@ class Graphiti:
                     else {('Entity', 'Entity'): []}
                 )
 
-                # Extract and resolve nodes
-                extracted_nodes, node_episode_index_map = await extract_nodes(
-                    clients,
-                    episode,
-                    previous_episodes,
-                    entity_types,
-                    excluded_entity_types,
-                    custom_extraction_instructions,
+                # Combined extraction (one LLM call for nodes + edges) keeps
+                # relation endpoints tied to entities extracted in the same
+                # call, closing recall gaps like entities mentioned in a
+                # relation but never linked. Disable via
+                # GRAPHITI_COMBINED_EXTRACTION=false.
+                combined_extraction = (
+                    os.environ.get('GRAPHITI_COMBINED_EXTRACTION', 'true').lower()
+                    in ('1', 'true', 'yes')
                 )
+                extracted_edges = None
+                node_episode_index_map = None
+                if combined_extraction:
+                    extracted_nodes, extracted_edges, node_episode_index_map = (
+                        await extract_nodes_and_edges(
+                            clients,
+                            episode,
+                            previous_episodes or [],
+                            entity_types,
+                            excluded_entity_types,
+                            edge_type_map or edge_type_map_default,
+                            edge_types,
+                            custom_extraction_instructions,
+                        )
+                    )
+                else:
+                    # Extract and resolve nodes
+                    extracted_nodes, node_episode_index_map = await extract_nodes(
+                        clients,
+                        episode,
+                        previous_episodes,
+                        entity_types,
+                        excluded_entity_types,
+                        custom_extraction_instructions,
+                    )
 
                 nodes, uuid_map, _ = await resolve_extracted_nodes(
                     clients,
@@ -1194,23 +1221,40 @@ class Graphiti:
                     entity_types,
                 )
 
-                # Extract and resolve edges in parallel with attribute extraction
-                (
-                    resolved_edges,
-                    invalidated_edges,
-                    new_edges,
-                ) = await self._extract_and_resolve_edges(
-                    episode,
-                    extracted_nodes,
-                    previous_episodes,
-                    edge_type_map or edge_type_map_default,
-                    group_id,
-                    edge_types,
-                    nodes,
-                    uuid_map,
-                    custom_extraction_instructions,
-                    clients=clients,
-                )
+                if extracted_edges is not None:
+                    # Edges came from the combined call; only resolve them
+                    # against the existing graph.
+                    resolved_edge_pointers = resolve_edge_pointers(extracted_edges, uuid_map)
+                    (
+                        resolved_edges,
+                        invalidated_edges,
+                        new_edges,
+                    ) = await resolve_extracted_edges(
+                        clients,
+                        resolved_edge_pointers,
+                        episode,
+                        nodes,
+                        edge_types or {},
+                        edge_type_map or edge_type_map_default,
+                    )
+                else:
+                    # Extract and resolve edges in parallel with attribute extraction
+                    (
+                        resolved_edges,
+                        invalidated_edges,
+                        new_edges,
+                    ) = await self._extract_and_resolve_edges(
+                        episode,
+                        extracted_nodes,
+                        previous_episodes,
+                        edge_type_map or edge_type_map_default,
+                        group_id,
+                        edge_types,
+                        nodes,
+                        uuid_map,
+                        custom_extraction_instructions,
+                        clients=clients,
+                    )
 
                 entity_edges = resolved_edges + invalidated_edges
 

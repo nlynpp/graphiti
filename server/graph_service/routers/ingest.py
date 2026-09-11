@@ -53,8 +53,17 @@ async def add_messages(
     request: AddMessagesRequest,
     graphiti: ZepGraphitiDep,
 ):
+    from graph_service.ontology_setup import get_ontology_entity_types, ontology_instructions
+
+    # Ontology-constrained extraction (spec section 10): the LLM may only
+    # emit entity types from the versioned legal ontology whitelist.
+    entity_types = get_ontology_entity_types()
+    instructions = ontology_instructions()
+
+    episode_uuids: list[str] = []
+
     async def add_messages_task(m: Message):
-        await graphiti.add_episode(
+        result = await graphiti.add_episode(
             # Do not pass a client UUID for new episodes: graphiti-core treats
             # a supplied UUID as an existing node lookup. It will generate a
             # UUID for this new episode.
@@ -64,7 +73,27 @@ async def add_messages(
             reference_time=m.timestamp,
             source=EpisodeType.message,
             source_description=m.source_description,
+            entity_types=entity_types,
+            custom_extraction_instructions=instructions,
         )
+        episode_uuids.append(result.episode.uuid)
+        # Bridge the deterministic Content layer to this episode so
+        # Content-[:MENTIONS]->Entity can be copied from episode MENTIONS.
+        chunk_id = _chunk_id_from_description(m.source_description)
+        if chunk_id:
+            await graphiti.driver.execute_query(
+                """
+                MATCH (c:Content {chunk_id: $chunk_id})
+                SET c.episode_uuid = $episode_uuid
+                """,
+                chunk_id=chunk_id,
+                episode_uuid=result.episode.uuid,
+            )
+
+    def _chunk_id_from_description(description: str | None) -> str | None:
+        if not description or not description.startswith('chunk_id='):
+            return None
+        return description[len('chunk_id='):] or None
 
     # Process in the request scope so the Graphiti client remains open until
     # each episode has been persisted. The previous queue-based approach could

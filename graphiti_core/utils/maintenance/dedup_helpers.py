@@ -217,6 +217,22 @@ def _build_candidate_indexes(existing_nodes: list[EntityNode]) -> DedupCandidate
     )
 
 
+def _specific_types(node: EntityNode) -> set[str]:
+    """Return the non-generic entity type labels of a node."""
+    return {label for label in node.labels if label != 'Entity'}
+
+
+def _types_conflict(a: EntityNode, b: EntityNode) -> bool:
+    """True when both nodes carry specific types that disagree.
+
+    Same surface forms with different types (Apple Inc. the enterprise vs
+    苹果 the material) must never auto-merge on name alone (spec section 5.2).
+    """
+    a_types = _specific_types(a)
+    b_types = _specific_types(b)
+    return bool(a_types) and bool(b_types) and a_types.isdisjoint(b_types)
+
+
 def _resolve_with_similarity(
     extracted_nodes: list[EntityNode],
     indexes: DedupCandidateIndexes,
@@ -234,16 +250,22 @@ def _resolve_with_similarity(
 
         # --- exact-name matching (always attempted) ---
         existing_matches = indexes.normalized_existing.get(normalized_exact, [])
-        if len(existing_matches) == 1:
-            match = _promote_resolved_node(node, existing_matches[0])
-            state.resolved_nodes[idx] = match
-            state.uuid_map[node.uuid] = match.uuid
-            if match.uuid != node.uuid:
-                state.duplicate_pairs.append((node, match))
-            continue
-        if len(existing_matches) > 1:
+        if existing_matches and not any(_types_conflict(node, match) for match in existing_matches):
+            if len(existing_matches) == 1:
+                match = _promote_resolved_node(node, existing_matches[0])
+                state.resolved_nodes[idx] = match
+                state.uuid_map[node.uuid] = match.uuid
+                if match.uuid != node.uuid:
+                    state.duplicate_pairs.append((node, match))
+                continue
             # Ambiguous: multiple candidates share the same normalized name.
             # Escalate to LLM so it can pick the best match.
+            state.unresolved_indices.append(idx)
+            continue
+        if len(existing_matches) > 1 or (
+            existing_matches and _types_conflict(node, existing_matches[0])
+        ):
+            # Ambiguous or type-conflicting: escalate / refuse to merge.
             state.unresolved_indices.append(idx)
             continue
 
@@ -269,6 +291,9 @@ def _resolve_with_similarity(
                 best_candidate = indexes.nodes_by_uuid.get(candidate_id)
 
         if best_candidate is not None and best_score >= _FUZZY_JACCARD_THRESHOLD:
+            if _types_conflict(node, best_candidate):
+                state.unresolved_indices.append(idx)
+                continue
             best_candidate = _promote_resolved_node(node, best_candidate)
             state.resolved_nodes[idx] = best_candidate
             state.uuid_map[node.uuid] = best_candidate.uuid
@@ -293,4 +318,5 @@ __all__ = [
     '_build_candidate_indexes',
     '_promote_resolved_node',
     '_resolve_with_similarity',
+    '_types_conflict',
 ]
