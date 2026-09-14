@@ -16,7 +16,7 @@ import urllib.request
 from neo4j import AsyncGraphDatabase
 
 NEO4J = ('bolt://localhost:7687', ('neo4j', 'Graphiti123'))
-SERVICE = 'http://localhost:8000'
+SERVICE = 'http://127.0.0.1:8000'
 GROUP = 'ohn_legal_full'
 AMENDMENT_YEARS = ['1988', '1993', '1999', '2004', '2018']
 

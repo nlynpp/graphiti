@@ -19,7 +19,7 @@ import urllib.request
 
 import pytest
 
-SERVICE = 'http://localhost:8000'
+SERVICE = 'http://127.0.0.1:8000'
 GROUP_ID = 'ohn_legal_test'
 NEO4J_URI = 'bolt://localhost:7687'
 NEO4J_AUTH = ('neo4j', 'Graphiti123')

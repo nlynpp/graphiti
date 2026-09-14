@@ -46,3 +46,13 @@ class GetMemoryRequest(BaseModel):
 
 class GetMemoryResponse(BaseModel):
     facts: list[FactResult] = Field(..., description='The facts that were retrieved from the graph')
+
+
+class GraphSearchQuery(BaseModel):
+    group_ids: list[str] | None = Field(
+        None, description='The group ids for the search'
+    )
+    query: str
+    max_tokens: int = Field(default=4000, description='Total token budget for packed evidence')
+    max_entries: int = Field(default=3, description='Maximum entry entities')
+    max_hops: int = Field(default=2, description='Maximum graph expansion hops')

@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from graph_service.config import get_settings
 from graph_service.routers import ingest, retrieve
@@ -22,6 +24,10 @@ app = FastAPI(lifespan=lifespan)
 
 app.include_router(retrieve.router)
 app.include_router(ingest.router)
+
+# Retrieval test bench (static single-page UI).
+_STATIC_DIR = Path(__file__).parent / 'static'
+app.mount('/ui', StaticFiles(directory=_STATIC_DIR, html=True), name='ui')
 
 
 @app.get('/healthcheck')

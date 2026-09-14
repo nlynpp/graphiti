@@ -45,7 +45,7 @@ def post(path: str, payload: dict, timeout: int = 3600):
     import urllib.request
 
     req = urllib.request.Request(
-        f'http://localhost:8000{path}',
+        f'http://127.0.0.1:8000{path}',
         data=json.dumps(payload).encode('utf-8'),
         headers={'Content-Type': 'application/json'},
         method='POST',

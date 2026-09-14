@@ -1,0 +1,28 @@
+{
+  "name": "constitutional_amendments_cross_chunk_comparison",
+  "description": "跨文档、跨多个 Content chunk 的多证据检索：比较1988年与1993年宪法修正案中改革开放和经济制度相关修改。",
+  "request": {
+    "group_ids": ["ohn_legal_full"],
+    "query": "请综合比较《中华人民共和国宪法修正案（1988年）》和《中华人民共和国宪法修正案（1993年）》中与改革开放、私营经济和社会主义市场经济有关的修改，分别说明修改内容，并给出每项结论对应的原文证据。",
+    "max_tokens": 4000,
+    "max_entries": 6,
+    "max_hops": 2
+  },
+  "expected": {
+    "min_content_count": 3,
+    "must_include_documents": [
+      "中华人民共和国宪法修正案（1988年）",
+      "中华人民共和国宪法修正案（1993年）"
+    ],
+    "evidence_requirements": [
+      "1988年修正案关于私营经济是社会主义公有制经济补充的原文",
+      "1988年修正案关于土地使用权可以依法转让的原文",
+      "1993年修正案关于社会主义初级阶段、改革开放或社会主义市场经济的原文"
+    ],
+    "graph_checks": [
+      "结果同时包含两个 Document 下的 Content",
+      "每个返回 Content 能通过 MENTIONS 连接到至少一个 Entity",
+      "返回内容带有 chunk_id、title 或 heading_path，能够回溯原文"
+    ]
+  }
+}

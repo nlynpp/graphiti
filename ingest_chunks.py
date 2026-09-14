@@ -2,7 +2,7 @@ import json
 import sys
 import urllib.request
 
-BASE = 'http://localhost:8000'
+BASE = 'http://127.0.0.1:8000'
 CHUNKS = r'G:\实习\律所RAG\OHN-GraphRAG_chunks_test\chunks.jsonl'
 GROUP_ID = 'ohn_legal_test'
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 10

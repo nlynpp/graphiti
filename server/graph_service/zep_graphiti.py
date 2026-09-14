@@ -121,7 +121,17 @@ def _create_llm(settings):
 
 
 def _create_embedder(settings):
-    return OpenAIEmbedder(OpenAIEmbedderConfig(api_key=settings.openai_api_key, base_url=settings.openai_base_url, embedding_model=settings.embedding_model_name or 'text-embedding-v2', embedding_dim=1536))
+    # Embedding may live on a different provider than the LLM (e.g. LLM on
+    # DeepSeek, embeddings on SiliconFlow bge-m3); fall back to the LLM
+    # endpoint when no embedding-specific endpoint is configured.
+    return OpenAIEmbedder(
+        OpenAIEmbedderConfig(
+            api_key=settings.embedding_api_key or settings.openai_api_key,
+            base_url=settings.embedding_base_url or settings.openai_base_url,
+            embedding_model=settings.embedding_model_name or 'text-embedding-v2',
+            embedding_dim=settings.embedding_dimensions or 1536,
+        )
+    )
 
 
 async def get_graphiti(settings: ZepEnvDep):
