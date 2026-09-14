@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>OHN-GraphRAG 检索测试台</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; background: #f4f6f9; color: #223; }
+  header { background: #1f3b57; color: #fff; padding: 14px 24px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header span { opacity: .7; font-size: 12px; }
+  .bar { display: flex; gap: 8px; padding: 14px 24px; background: #fff; border-bottom: 1px solid #e3e8ee; flex-wrap: wrap; }
+  .bar input[type=text] { flex: 1; min-width: 320px; padding: 9px 12px; border: 1px solid #c5cdd8; border-radius: 6px; font-size: 14px; }
+  .bar input[type=number] { width: 90px; padding: 9px 8px; border: 1px solid #c5cdd8; border-radius: 6px; }
+  button { padding: 9px 18px; border: 0; border-radius: 6px; background: #2b6cb0; color: #fff; cursor: pointer; font-size: 14px; }
+  button:hover { background: #2c5282; }
+  button.alt { background: #718096; }
+  .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px 24px; }
+  .panel { background: #fff; border: 1px solid #e3e8ee; border-radius: 8px; padding: 14px; min-height: 200px; }
+  .panel h3 { margin: 0 0 10px; font-size: 14px; color: #1f3b57; border-bottom: 2px solid #e3e8ee; padding-bottom: 6px; }
+  .chip { display: inline-block; margin: 2px 4px 2px 0; padding: 3px 10px; border-radius: 12px; font-size: 12px; }
+  .chip.entry { background: #ebf4ff; color: #2b6cb0; border: 1px solid #bee3f8; }
+  .chip.kw { background: #f0fff4; color: #276749; border: 1px solid #c6f6d5; }
+  .fact { padding: 7px 10px; margin-bottom: 6px; background: #fafbfc; border-left: 3px solid #4299e1; border-radius: 4px; font-size: 13px; }
+  .fact .hop { color: #805ad5; font-weight: bold; margin-right: 6px; }
+  .fact .rel { color: #b7791f; }
+  .fact .path { color: #718096; }
+  .content { padding: 8px 10px; margin-bottom: 8px; background: #fffaf0; border-left: 3px solid #dd6b20; border-radius: 4px; font-size: 13px; }
+  .content .src { color: #9c4221; font-weight: bold; font-size: 12px; }
+  #graph { height: 420px; border: 1px solid #e3e8ee; border-radius: 6px; }
+  .meta { font-size: 12px; color: #718096; margin-top: 8px; }
+  .empty { color: #a0aec0; font-size: 13px; padding: 20px; text-align: center; }
+  .degraded { background: #fff5f5; color: #c53030; padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<header><h1>OHN-GraphRAG 检索测试台 <span>事实先行入口 → 关系图搜 → 槽位驱动装箱（零 LLM）</span></h1></header>
+<div class="bar">
+  <input type="text" id="q" placeholder="输入检索问题，如：私营经济的宪法地位是哪一年由哪个机构确立的">
+  <input type="number" id="budget" value="4000" title="max_token 预算"> token
+  <input type="number" id="hops" value="2" min="1" max="4" title="最大跳数"> 跳
+  <button onclick="run('/search/graph')">图检索</button>
+  <button class="alt" onclick="run('/search')">混合检索对比</button>
+</div>
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <h3>检索结果</h3>
+      <div id="result"><div class="empty">输入问题后点击「图检索」</div></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h3>原文证据（Content 回读）</h3>
+      <div id="contents"><div class="empty">暂无</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>证据路径图</h3>
+    <div id="graph"></div>
+    <div class="meta">紫=入口实体 · 蓝=扩展实体 · 橙=原文 Content · 边上为关系名</div>
+  </div>
+</div>
+<script>
+const API = location.origin;
+let network = null;
+
+async function run(path) {
+  const q = document.getElementById('q').value.trim();
+  if (!q) return alert('请输入问题');
+  const body = path === '/search/graph'
+    ? { group_ids: ['ohn_legal_full'], query: q, max_tokens: +document.getElementById('budget').value, max_hops: +document.getElementById('hops').value }
+    : { group_ids: ['ohn_legal_full'], query: q, max_facts: 15 };
+  document.getElementById('result').innerHTML = '<div class="empty">检索中…</div>';
+  try {
+    const resp = await fetch(API + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await resp.json();
+    path === '/search/graph' ? renderGraphResult(data) : renderHybridResult(data);
+  } catch (e) {
+    document.getElementById('result').innerHTML = `<div class="degraded">请求失败: ${e}</div>`;
+  }
+}
+
+function renderGraphResult(r) {
+  const el = document.getElementById('result');
+  let html = '';
+  if (r.degraded) html += `<div class="degraded">${r.note || '未找到入口实体'}</div>`;
+  if (r.mode === 'enumeration') html += `<div class="degraded" style="background:#ebf8ff;color:#2b6cb0">枚举模式（检测到「${esc(r.enum_signal)}」）：完全列举，不做相关度截断</div>`;
+  html += '<div>' + (r.entries || []).map(e => `<span class="chip entry">入口: ${e.name} [${e.type || 'Entity'}]</span>`).join('')
+        + (r.keywords || []).map(k => `<span class="chip kw">${k}</span>`).join('') + '</div>';
+  if (r.mode === 'enumeration' && r.groups) {
+    html += (r.groups || []).map(g => `
+      <div style="margin-top:10px"><b>${esc(g.doc)}</b> — ${g.clauses.length} 项</div>` +
+      g.clauses.map(c => `<div class="fact"><span class="rel">${esc(c.relation)}</span> <b>${esc(c.clause)}</b><br><span class="path">${esc(c.fact || '')}</span>${renderClauseContent(c)}</div>`).join('')
+    ).join('');
+    html += `<div class="meta">枚举 ${ (r.groups || []).reduce((a, g) => a + g.clauses.length, 0) } 项 · 原文 ${ (r.contents || []).length } 篇 · token ${r.tokens_used}/${r.token_budget}</div>`;
+    el.innerHTML = html;
+    renderContents(r.contents);
+    drawGraph(r);
+    return;
+  }
+  html += '<div style="margin-top:10px">' + (r.facts || []).map(f =>
+    `<div class="fact"><span class="hop">${f.hop}跳</span><b>${esc(f.src)}</b> <span class="rel">-[${esc(f.relation)}]-&gt;</span> <b>${esc(f.tgt)}</b><br><span class="path">${esc(f.fact || '')}</span></div>`
+  ).join('') + '</div>';
+  html += `<div class="meta">事实 ${ (r.facts || []).length } 条 · 原文 ${ (r.contents || []).length } 篇 · token ${r.tokens_used}/${r.token_budget}</div>`;
+  el.innerHTML = html;
+  renderContents(r.contents);
+  drawGraph(r);
+}
+
+function renderClauseContent(c) {
+  if (!c.content) return '';
+  if (c.content.duplicate) return `<br><span class="path">↪ 原文同上（${esc(c.content.title)}）</span>`;
+  return `<br><span class="path">📄 ${esc(c.content.title)}：${esc((c.content.text || '').slice(0, 120))}…</span>`;
+}
+
+function renderHybridResult(r) {
+  const facts = r.facts || [];
+  document.getElementById('result').innerHTML =
+    `<div class="meta">混合检索返回 ${facts.length} 条事实（无跳数概念，仅相关度排序）</div>` +
+    facts.map(f => `<div class="fact"><span class="rel">${esc(f.name)}</span> ${esc(f.fact)}</div>`).join('');
+  document.getElementById('contents').innerHTML = '<div class="empty">混合检索不回读原文，请用图检索</div>';
+  if (network) network.destroy();
+  document.getElementById('graph').innerHTML = '<div class="empty">混合检索无路径图</div>';
+}
+
+function renderContents(contents) {
+  const el = document.getElementById('contents');
+  el.innerHTML = (contents && contents.length)
+    ? contents.map((c, i) => `<div class="content"><div class="src">${esc(c.title)} · ${esc(c.path || '')}</div><span id="t${i}">${esc((c.text || '').slice(0, 300))}${(c.text || '').length > 300 ? '…' : ''}</span> <button style="padding:2px 8px;font-size:11px" onclick="loadFull('${esc(c.chunk_id)}','t${i}',this)">查看全文</button></div>`).join('')
+    : '<div class="empty">无原文证据</div>';
+}
+
+async function loadFull(chunkId, targetId, btn) {
+  btn.textContent = '加载中…';
+  const resp = await fetch(`${API}/content/${encodeURIComponent(chunkId)}`);
+  const data = await resp.json();
+  document.getElementById(targetId).textContent = data.text || '(未找到)';
+  btn.remove();
+}
+
+function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+
+function drawGraph(r) {
+  const nodes = new Map(), edges = [];
+  const addNode = (id, label, color, shape) => {
+    if (!nodes.has(id)) nodes.set(id, { id, label: label.slice(0, 18), color, shape });
+  };
+  (r.entries || []).forEach(e => addNode('e_' + e.uuid, '★' + e.name, '#805ad5', 'dot'));
+  (r.facts || []).forEach(f => {
+    addNode('f_' + f.src_uuid, f.src, '#4299e1', 'dot');
+    addNode('f_' + f.tgt, f.tgt, '#4299e1', 'dot');
+    edges.push({ from: 'f_' + f.src_uuid, to: 'f_' + f.tgt, label: f.relation, font: { size: 10 }, color: '#a0aec0' });
+  });
+  (r.contents || []).forEach((c, i) => {
+    const cid = 'c_' + i;
+    addNode(cid, '📄' + c.title, '#dd6b20', 'box');
+    (r.entries || []).forEach(e => edges.push({ from: 'e_' + e.uuid, to: cid, label: 'MENTIONS', dashes: true, font: { size: 9 }, color: '#dd6b20' }));
+  });
+  const container = document.getElementById('graph');
+  container.innerHTML = '';
+  network = new vis.Network(container, {
+    nodes: [...nodes.values()].map(n => ({ ...n, font: { size: 12 } })),
+    edges,
+  }, {
+    layout: { improvedLayout: false },
+    physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { springLength: 120 } },
+    edges: { arrows: 'to' },
+  });
+}
+</script>
+</body>
+</html>
