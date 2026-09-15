@@ -77,6 +77,22 @@ def detect_enumeration(question: str) -> tuple[bool, str]:
     return False, ''
 
 
+def _has_document_entry(entries: list[dict], question: str) -> bool:
+    """Enumeration is only meaningful when the question names the documents to
+    enumerate (by year or by name prefix); topical questions fall through to
+    packed retrieval instead of listing a random hub's clauses."""
+    for e in entries:
+        name = e['name'] or ''
+        if len(name) < 4:
+            continue
+        if any(marker in name for marker in ('修正案', '条例', '规定', '法')):
+            if any(y in question for y in _year_fragments(name)):
+                return True
+            if name[:4] in question:
+                return True
+    return False
+
+
 def extract_slots(question: str) -> list[str]:
     """Rule-based intent slots: relations the answer requires."""
     slots: list[str] = []
@@ -117,10 +133,11 @@ class GraphRetriever:
                 )
                 top_edges = (results.edges or [])[:12]
                 endpoint_uuids: list[str] = []
-                for edge in top_edges:
+                for rank, edge in enumerate(top_edges):
                     endpoint_uuids.extend([edge.source_node_uuid, edge.target_node_uuid])
+                    # Rank-weighted: endpoints of the very top facts matter most.
                     for uuid in (edge.source_node_uuid, edge.target_node_uuid):
-                        scores[uuid] = scores.get(uuid, 0) + 1.0
+                        scores[uuid] = scores.get(uuid, 0) + 1.0 / (rank + 1)
                 if endpoint_uuids:
                     name_rows = await self._run(
                         """
@@ -148,12 +165,14 @@ class GraphRetriever:
         )
         for row in name_rows:
             meta[row['uuid']] = row
-            bonus = 10.0
-            # Years/document numbers are strong intent signals.
+            name = row['name'] or ''
+            # Length-weighted: a long exact document name in the question is a
+            # strong signal; a 2-char hub name (宪法) matching incidentally is not.
+            bonus = 2.0 + 0.8 * len(name)
             if any(ch.isdigit() for ch in question) and any(
-                y in question for y in _year_fragments(row['name'] or '')
+                y in question for y in _year_fragments(name)
             ):
-                bonus = 12.0
+                bonus = max(bonus, 12.0)
             scores[row['uuid']] = scores.get(row['uuid'], 0) + bonus
 
         scored: list[tuple[float, dict]] = []
@@ -166,6 +185,11 @@ class GraphRetriever:
                 continue
             scored.append((score, row))
         scored.sort(key=lambda item: item[0], reverse=True)
+        # Score cliff: entries far below the top scorer are usually fragment
+        # matches on hub documents that flood hop-1 with off-topic facts.
+        if scored:
+            cliff = scored[0][0] * 0.4
+            scored = [item for item in scored if item[0] >= cliff]
         entries = [row for _score, row in scored[:max_entries]]
 
         keywords = [e['name'] for e in entries]
@@ -176,21 +200,22 @@ class GraphRetriever:
 
     # ---------------- 2. graph expansion ----------------
 
-    async def expand(self, entry_uuids: list[str], max_hops: int = 2, question: str = '') -> list[dict]:
+    async def expand(
+        self, entry_uuids: list[str], max_hops: int = 2, question: str = '',
+        per_hop_limit: int = 25,
+    ) -> list[dict]:
         facts: dict[str, dict] = {}
         seen_pairs: set[tuple[str, str, str]] = set()
         frontier = entry_uuids
-        grams = {
-            question[i : i + g]
-            for g in range(2, 5)
-            for i in range(len(question) - g + 1)
-            if _is_cjk(question[i])
-        }
-
-        def relevance(fact_text: str | None) -> int:
-            if not fact_text:
-                return 0
-            return sum(1 for gram in grams if gram in fact_text)
+        grams = sorted(
+            {
+                question[i : i + g]
+                for g in range(2, 4)
+                for i in range(len(question) - g + 1)
+                if _is_cjk(question[i])
+            },
+            key=lambda g: -len(g),
+        )[:24]
 
         for hop in range(1, max_hops + 1):
             rows = await self._run(
@@ -198,14 +223,19 @@ class GraphRetriever:
                 MATCH (a:Entity)-[r:RELATES_TO]-(b:Entity)
                 WHERE a.uuid IN $frontier AND a.uuid <> b.uuid
                 OPTIONAL MATCH (b)-[deg:RELATES_TO]-()
-                WITH a, r, b, count(deg) AS b_degree
+                WITH a, r, b, count(deg) AS b_degree,
+                     size([g IN $grams WHERE r.fact CONTAINS g]) AS relevance
+                ORDER BY relevance DESC, b_degree DESC
+                LIMIT $per_hop
                 RETURN a.uuid AS src_uuid, a.name AS src, r.uuid AS rel_uuid,
                        coalesce(r.name, type(r)) AS relation, r.fact AS fact,
                        r.episodes AS episodes,
                        b.uuid AS tgt_uuid, b.name AS tgt, b_degree,
-                       type(r) AS rel_type
+                       relevance, type(r) AS rel_type
                 """,
                 frontier=frontier,
+                grams=sorted(grams),
+                per_hop=per_hop_limit,
             )
             new_frontier: list[str] = []
             for row in rows:
@@ -218,16 +248,18 @@ class GraphRetriever:
                 seen_pairs.add(pair_key)
                 row['hop'] = hop
                 row['episodes'] = row.get('episodes') or []
-                row['relevance'] = relevance(row.get('fact'))
+                row['relevance'] = row.get('relevance') or 0
                 facts[key] = row
                 if row['tgt_uuid'] not in entry_uuids and row['tgt'] not in _ENTRY_STOPWORDS:
                     new_frontier.append(row['tgt_uuid'])
             if not new_frontier:
                 break
             frontier = new_frontier
+        # Relevance dominates: a hop-2 fact that mentions the question beats
+        # a hop-1 hub fact that does not (prevents hop-1 flooding the budget).
         return sorted(
             facts.values(),
-            key=lambda f: (f['hop'], -f.get('relevance', 0), -(f['b_degree'] or 0)),
+            key=lambda f: (-f.get('relevance', 0), f['hop'], -(f['b_degree'] or 0)),
         )
 
     # ---------------- 3. read-back + packing ----------------
@@ -469,7 +501,7 @@ class GraphRetriever:
             }
 
         is_enum, signal = detect_enumeration(question)
-        if is_enum:
+        if is_enum and _has_document_entry(entries, question):
             result = await self.enumerate_evidence(question, entries, max_tokens)
             result['keywords'] = keywords
             result['enum_signal'] = signal
@@ -477,6 +509,10 @@ class GraphRetriever:
 
         facts = await self.expand([e['uuid'] for e in entries], max_hops, question)
         slot_relations = extract_slots(question)
+        # With enough on-topic signal, zero-relevance facts are hub noise.
+        positive = [f for f in facts if f.get('relevance', 0) > 0]
+        if len(positive) >= 8:
+            facts = [f for f in facts if f.get('relevance', 0) > 0 or f.get('relation') in slot_relations]
         packed_facts, fact_tokens = self.pack_facts(facts, fact_budget, slot_relations)
         slot_eps: list[str] = []
         all_eps: list[str] = []
